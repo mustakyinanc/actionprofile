@@ -1,22 +1,17 @@
-name: Vprofile CICD Workflow
-on: 
+name: actionprofile CICD Workflow
+on:
   push:
-    branches: 
+    branches:
       - main
-
   pull_request:
-    branches: 
+    branches:
       - main
-
   workflow_dispatch:
 
-  #schedule:
-   # - cron: "10 14 * * 1-5"   # After noon 2:10 pm, Monday to Friday
-
 env:
-  ECR_REPOSITORY: 'vprofile-app-image'
-  
-permissions: 
+  ECR_REPOSITORY: 'actionprofile'
+
+permissions:
   contents: read
 
 jobs:
@@ -29,16 +24,16 @@ jobs:
           fetch-depth: 0
 
       - name: Maven Build
-        run: mvn install
+        run: mvn clean install -DskipTests
 
       - name: Upload Build Artifact (WAR)
         uses: actions/upload-artifact@v4
         with:
-          name: vprofile-app
+          name: actionprofile-app
           path: target/*.war
 
 
-  Testing:
+  Unit_Test:
     runs-on: ubuntu-latest
     needs: Build
     steps:
@@ -47,50 +42,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Run tests on main branch
-        if: github.ref == 'refs/heads/main'
+      - name: Run Unit Tests
         run: mvn test
-
-      - name: Checkstyle
-        if: github.ref == 'refs/heads/main'
-        run: mvn checkstyle:checkstyle
-
-      - name: Run tests on other branches
-        if: github.ref != 'refs/heads/main'
-        run: echo "Skipping unit tests and code analysis"
-
-
-  Security_Scan:
-    runs-on: ubuntu-latest
-    needs: Build
-    steps:
-      - name: Code checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Run Trivy filesystem scan
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          format: json
-          exit-code: 0
-          vuln-type: os,library
-          output: trivy-results.json
-
-      - name: Upload Trivy scan results as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-scan-results
-          path: trivy-results.json
 
 
   BUILD_AND_PUBLISH:
     name: BUILD_AND_PUBLISH
     runs-on: ubuntu-latest
-    environment: production
-    needs: [Build, Testing, Security_Scan]
+    needs: [Build, Unit_Test]
     if: github.ref == 'refs/heads/main'
     steps:
       - name: Code checkout
@@ -106,38 +65,35 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
 
       - name: Login to Amazon ECR
-        id: login-ecr 
+        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build, tag, and push image to Amazon ECR
-        id: build-image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -f Docker-files/app/multistage/Dockerfile -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
 
-  Notify_On_Failure:
+  Notify_DevOps_Agent:
     name: Notify DevOps Agent on Failure
     runs-on: ubuntu-latest
-    # Tüm job'lara bağlı - herhangi biri fail veya cancel olsa bile çalışır
-    needs: [Build, Testing, Security_Scan, BUILD_AND_PUBLISH]
-    if: always() && (needs.Build.result == 'failure' || needs.Testing.result == 'failure' || needs.Security_Scan.result == 'failure' || needs.BUILD_AND_PUBLISH.result == 'failure')
+    needs: [Build, Unit_Test, BUILD_AND_PUBLISH]
+    if: always() && (needs.Build.result == 'failure' || needs.Unit_Test.result == 'failure' || needs.BUILD_AND_PUBLISH.result == 'failure')
     steps:
       - name: Determine failed job
         id: failed_job
         run: |
           if [ "${{ needs.Build.result }}" = "failure" ]; then
             echo "name=Build" >> $GITHUB_OUTPUT
-            echo "detail=Maven Build or WAR artifact upload failed." >> $GITHUB_OUTPUT
-          elif [ "${{ needs.Testing.result }}" = "failure" ]; then
-            echo "name=Testing" >> $GITHUB_OUTPUT
-            echo "detail=Maven Test or Checkstyle step failed." >> $GITHUB_OUTPUT
-          elif [ "${{ needs.Security_Scan.result }}" = "failure" ]; then
-            echo "name=Security_Scan" >> $GITHUB_OUTPUT
-            echo "detail=Trivy security scan or artifact upload failed." >> $GITHUB_OUTPUT
+            echo "detail=Maven Build or artifact upload failed." >> $GITHUB_OUTPUT
+          elif [ "${{ needs.Unit_Test.result }}" = "failure" ]; then
+            echo "name=Unit_Test" >> $GITHUB_OUTPUT
+            echo "detail=Maven unit tests failed." >> $GITHUB_OUTPUT
           else
             echo "name=BUILD_AND_PUBLISH" >> $GITHUB_OUTPUT
             echo "detail=Docker image build or ECR push failed." >> $GITHUB_OUTPUT
@@ -153,16 +109,15 @@ jobs:
           FAILED_JOB="${{ steps.failed_job.outputs.name }}"
           DETAIL="${{ steps.failed_job.outputs.detail }}"
 
-          PAYLOAD=$(printf '{"eventType":"incident","incidentId":"%s","action":"created","priority":"HIGH","title":"[Vprofile CICD] %s job failed on %s","description":"%s Investigate the failure related to the latest commit and identify the root cause. Workflow:%s Job:%s Branch:%s Commit:%s TriggeredBy:%s Run URL:https://github.com/%s/actions/runs/%s 1. Review changes introduced in the latest commit 2. Analyze job logs 3. Identify root cause and suggest a fix","service":"vprofile","timestamp":"%s","data":{"metadata":{"repository":"%s","branch":"%s","commit":"%s","workflow":"%s","run_id":"%s","actor":"%s","failed_job":"%s"}}}' \
+          PAYLOAD=$(printf \
+            '{"eventType":"incident","incidentId":"%s","action":"created","priority":"HIGH","title":"[GITHUB ACTIONS] actionprofile workflow failed on %s","description":"Source: GitHub Actions. %s Investigate the failure related to the latest commit. Workflow:%s Job:%s Branch:%s Commit:%s Run URL:https://github.com/%s/actions/runs/%s 1. Review changes in the latest commit 2. Analyze GitHub Actions logs 3. Identify root cause and suggest a fix","service":"actionprofile-github-actions","timestamp":"%s","data":{"metadata":{"source":"GitHub Actions","repository":"%s","branch":"%s","commit":"%s","workflow":"%s","run_id":"%s","actor":"%s","failed_job":"%s"}}}' \
             "$INCIDENT_ID" \
-            "$FAILED_JOB" \
             "${{ github.ref_name }}" \
             "$DETAIL" \
             "${{ github.workflow }}" \
             "$FAILED_JOB" \
             "${{ github.ref_name }}" \
             "${{ github.sha }}" \
-            "${{ github.actor }}" \
             "${{ github.repository }}" \
             "${{ github.run_id }}" \
             "$TIMESTAMP" \
@@ -174,7 +129,9 @@ jobs:
             "${{ github.actor }}" \
             "$FAILED_JOB")
 
-          SIGNATURE=$(echo -n "${TIMESTAMP}:${PAYLOAD}" | openssl dgst -sha256 -hmac "$DEVOPS_AGENT_WEBHOOK_SECRET" -binary | base64 -w 0)
+          SIGNATURE=$(echo -n "${TIMESTAMP}:${PAYLOAD}" | \
+            openssl dgst -sha256 -hmac "$DEVOPS_AGENT_WEBHOOK_SECRET" -binary | \
+            base64 -w 0)
 
           HTTP_STATUS=$(curl -s -o /tmp/response.txt -w "%{http_code}" \
             -X POST "$DEVOPS_AGENT_WEBHOOK_URL" \
@@ -183,6 +140,6 @@ jobs:
             -H "x-amzn-event-signature: $SIGNATURE" \
             -d "$PAYLOAD")
 
-          echo "DevOps Agent → HTTP $HTTP_STATUS"
+          echo "DevOps Agent webhook -> HTTP $HTTP_STATUS"
           cat /tmp/response.txt
           exit 0

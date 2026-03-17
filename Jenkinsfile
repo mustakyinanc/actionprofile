@@ -2,16 +2,11 @@ pipeline {
     agent any
 
     environment {
-        ECR_REPOSITORY = 'vprofile-appimage'
+        ECR_REPOSITORY = 'actionprofile'
         AWS_REGION     = 'us-east-1'
 
-        // Demo: Bilerek fail ettirmek icin 'true' yapip push edin
-        // Normal calisma icin 'false' birakin
+        // Set to 'true' to intentionally fail the pipeline for demo purposes
         FORCE_FAIL     = 'false'
-    }
-
-    tools {
-        maven 'Maven3.9.9'
     }
 
     stages {
@@ -27,7 +22,7 @@ pipeline {
                 catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
                     script {
                         if (env.FORCE_FAIL == 'true') {
-                            error('FORCE_FAIL=true — Build intentionally failed for demo purposes.')
+                            error('[DEMO] Build intentionally failed. FORCE_FAIL=true')
                         }
                     }
                     sh 'mvn clean install -DskipTests'
@@ -76,7 +71,6 @@ pipeline {
 
                             docker build -t "$FULL_IMAGE" .
                             docker push "$FULL_IMAGE"
-
                             docker tag "$FULL_IMAGE" "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
                             docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
 
@@ -87,7 +81,6 @@ pipeline {
             }
         }
 
-        // ── Bu stage pipeline görselinde ayrı bir kutu olarak görünür ────────
         stage('Notify DevOps Agent') {
             when {
                 expression { currentBuild.currentResult == 'FAILURE' }
@@ -102,7 +95,7 @@ pipeline {
                         INCIDENT_ID=$(cat /proc/sys/kernel/random/uuid)
 
                         PAYLOAD=$(printf \
-                            '{"eventType":"incident","incidentId":"%s","action":"created","priority":"HIGH","title":"[Vprofile CICD] Pipeline failed on %s","description":"One or more stages failed in the Vprofile CICD pipeline. Investigate the failure related to the latest commit and identify the root cause. Job:%s Branch:%s Commit:%s Build URL:%s 1. Review changes in the latest commit 2. Analyze stage logs 3. Identify root cause and suggest a fix","service":"vprofile","timestamp":"%s","data":{"metadata":{"job":"%s","branch":"%s","commit":"%s","build_number":"%s","build_url":"%s"}}}' \
+                            '{"eventType":"incident","incidentId":"%s","action":"created","priority":"HIGH","title":"[JENKINS] actionprofile pipeline failed on %s","description":"Source: Jenkins Pipeline. One or more stages failed in the actionprofile pipeline. Investigate the failure related to the latest commit. Job:%s Branch:%s Commit:%s Build URL:%s 1. Review changes in the latest commit 2. Analyze Jenkins stage logs 3. Identify root cause and suggest a fix","service":"actionprofile-jenkins","timestamp":"%s","data":{"metadata":{"source":"Jenkins","job":"%s","branch":"%s","commit":"%s","build_number":"%s","build_url":"%s"}}}' \
                             "$INCIDENT_ID" \
                             "${BRANCH_NAME:-main}" \
                             "${JOB_NAME}" \
@@ -127,7 +120,7 @@ pipeline {
                             -H "x-amzn-event-signature: $SIGNATURE" \
                             -d "$PAYLOAD")
 
-                        echo "DevOps Agent webhook → HTTP $HTTP_STATUS"
+                        echo "DevOps Agent webhook -> HTTP $HTTP_STATUS"
                         cat /tmp/response.txt
                     '''
                 }
